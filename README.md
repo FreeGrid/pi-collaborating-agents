@@ -1,6 +1,6 @@
 # Collaborating Agents: An Extension for the Pi Coding Agent
 
-This is an extension for Pi for spawning subagents, and for them to reserve/receive files and send/receive messages to one another.
+This is an extension for Pi for spawning subagents, and for them to reserve files and send/receive messages to one another.
 
 All sessions auto-register immediately when they start; so when a new Pi session is started, it is already part of the collaborating agents system.
 
@@ -62,7 +62,7 @@ Examples:
 
 ## Spawning a subagent via the `/subagent` command
 
-The user can spawn a single subagent manually using the `/subagent [type] <task>` slash command. By default it runs as a background child process, but you can switch it to a visible cmux pane with `subagentLaunchMode`. It uses the default subagent type (`worker`/`default`) from this extension by default, but you can also specify a **subagent type** to use specialized configurations. All agents use readable two-word callsigns (for example: `SilverHarbor`). An immediate `Spawning subagent ...` status message with runtime name and prompt will be shown immediately.
+The user can spawn a single subagent manually using the `/subagent [type] <task>` slash command. By default it runs as a background child process, but you can switch it to a visible cmux pane with `subagentLaunchMode`. When no type is specified, the extension resolves the default subagent type (`worker`/`default`) using the normal override order described below. In slash-command usage, the first token is treated as a type only if it matches a known subagent type; otherwise the full input is treated as the task. All agents use readable two-word callsigns (for example: `SilverHarbor`). An immediate `Spawning subagent ...` status message with runtime name and prompt will be shown immediately.
 
 If you want spawned agents to appear in a visible cmux pane instead of only running as background child processes, set `subagentLaunchMode` to `"cmux-pane"` in your collaborating-agents config. That mode uses `cmux new-split` plus `cmux send`, then launches a real `pi` session directly in the new pane so you see Pi's own terminal output there while the orchestrator still collects the final subagent response automatically. This mode must be invoked from a Pi session that is already running inside a cmux terminal surface; otherwise subagent launch fails.
 
@@ -92,7 +92,7 @@ Actions:
 
 - `status` – current identity, focus mode, peer count, and your reservation count
 - `list` – list active agents (includes reservation counts when present)
-- `send` – send direct message (`to` + `message`, optional `urgent`)
+- `send` – send direct message (`to` + `message`, optional `replyTo`, optional `urgent`)
 - `broadcast` – send to all active peers (`message`, optional `urgent`)
 - `feed` – recent global message log (`limit` optional)
 - `thread` – direct-message thread with one peer (`to`, `limit` optional)
@@ -106,6 +106,7 @@ Examples:
 ```ts
 agent_message({ action: "list" })
 agent_message({ action: "send", to: "BlueFalcon", message: "I finished parsing" })
+agent_message({ action: "send", to: "BlueFalcon", message: "Following up on your last note", replyTo: "msg-123" })
 agent_message({ action: "send", to: "BlueFalcon", message: "Need your decision now", urgent: true })
 agent_message({ action: "broadcast", message: "Wave 2 complete" })
 agent_message({ action: "thread", to: "BlueFalcon", limit: 10 })
@@ -207,11 +208,17 @@ prompt = """You are a Scout subagent specialized in exploration...
 
 When no type is specified, the extension resolves the default in this order:
 
-1. `worker` from user/project overrides
-2. `default` from user/project overrides
-3. bundled `worker` from `examples/subagents/*.toml`
-4. Bundled `examples/subagents/worker.toml`
+1. any non-bundled `worker` override
+2. any non-bundled `default` override
+3. bundled discovered `worker`
+4. bundled `examples/subagents/worker.toml`
 5. Emergency inline fallback (only if bundled files are unavailable)
+
+Within the non-bundled override steps above, precedence is:
+- nearest project `.pi/agents/*.toml`
+- nearest project `.pi/subagents/*.toml` (legacy)
+- user `~/.pi/agents/*.toml`
+- user `~/.pi/agent/subagents/*.toml` (legacy)
 
 To customize the default behavior, create `worker.toml` in `~/.pi/agents/` or your project’s `.pi/agents/` directory.
 
