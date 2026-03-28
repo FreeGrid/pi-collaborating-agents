@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+  formatAgentDisplayName,
   getConflictsWithOtherAgents,
   listActiveAgents,
   pathMatchesReservation,
@@ -10,6 +11,8 @@ import {
   readMessageLog,
   readMessageLogTail,
   registerSelf,
+  resolveActiveAgentName,
+  resolveThreadPeerName,
   sendBroadcast,
   sendDirect,
   unregisterSelf,
@@ -215,6 +218,90 @@ describe("store inbox processing", () => {
 });
 
 describe("store messaging", () => {
+  test("resolveActiveAgentName accepts unique display aliases and role labels", () => {
+    const dirs = makeDirs("collab-store-resolve-active");
+    writeRegistration(dirs, makeRegistration("reviewer-ba15-SunnyBreeze"));
+
+    expect(formatAgentDisplayName("reviewer-ba15-SunnyBreeze")).toBe("SunnyBreeze");
+    expect(resolveActiveAgentName(dirs, "reviewer-ba15-SunnyBreeze")).toEqual({
+      ok: true,
+      name: "reviewer-ba15-SunnyBreeze",
+    });
+    expect(resolveActiveAgentName(dirs, "SunnyBreeze")).toEqual({
+      ok: true,
+      name: "reviewer-ba15-SunnyBreeze",
+    });
+    expect(resolveActiveAgentName(dirs, "SunnyBreeze (subagent)")).toEqual({
+      ok: true,
+      name: "reviewer-ba15-SunnyBreeze",
+    });
+  });
+
+  test("resolveActiveAgentName rejects ambiguous display aliases", () => {
+    const dirs = makeDirs("collab-store-resolve-ambiguous");
+    writeRegistration(dirs, makeRegistration("reviewer-ba15-SunnyBreeze"));
+    writeRegistration(dirs, makeRegistration("worker-c920-SunnyBreeze"));
+
+    const resolved = resolveActiveAgentName(dirs, "SunnyBreeze");
+    expect(resolved.ok).toBe(false);
+    if (resolved.ok) throw new Error("expected ambiguous alias to fail");
+    expect(resolved.error).toContain("ambiguous");
+    expect(resolved.matches).toEqual([
+      "reviewer-ba15-SunnyBreeze",
+      "worker-c920-SunnyBreeze",
+    ]);
+  });
+
+  test("resolveThreadPeerName accepts historical display aliases even after the peer exits", () => {
+    const dirs = makeDirs("collab-store-resolve-thread-historical");
+    const events: MessageLogEvent[] = [
+      {
+        id: "event-1",
+        from: "reviewer-ba15-SunnyBreeze",
+        to: "RapidRiver",
+        text: "Done",
+        kind: "direct",
+        timestamp: new Date().toISOString(),
+      },
+    ];
+
+    expect(resolveThreadPeerName(dirs, "RapidRiver", events, "SunnyBreeze")).toEqual({
+      ok: true,
+      name: "reviewer-ba15-SunnyBreeze",
+    });
+  });
+
+  test("resolveThreadPeerName rejects ambiguous historical display aliases", () => {
+    const dirs = makeDirs("collab-store-resolve-thread-ambiguous");
+    const events: MessageLogEvent[] = [
+      {
+        id: "event-1",
+        from: "reviewer-ba15-SunnyBreeze",
+        to: "RapidRiver",
+        text: "Done",
+        kind: "direct",
+        timestamp: new Date().toISOString(),
+      },
+      {
+        id: "event-2",
+        from: "worker-c920-SunnyBreeze",
+        to: "RapidRiver",
+        text: "Also done",
+        kind: "direct",
+        timestamp: new Date().toISOString(),
+      },
+    ];
+
+    const resolved = resolveThreadPeerName(dirs, "RapidRiver", events, "SunnyBreeze");
+    expect(resolved.ok).toBe(false);
+    if (resolved.ok) throw new Error("expected ambiguous thread alias to fail");
+    expect(resolved.error).toContain("ambiguous");
+    expect(resolved.matches).toEqual([
+      "reviewer-ba15-SunnyBreeze",
+      "worker-c920-SunnyBreeze",
+    ]);
+  });
+
   test("sendDirect validates inputs and persists trimmed payload + log event", () => {
     const dirs = makeDirs("collab-store-send-direct");
     writeRegistration(dirs, makeRegistration("BlueFalcon"));
@@ -257,6 +344,25 @@ describe("store messaging", () => {
       urgent: true,
       replyTo: "parent-1",
     });
+  });
+
+  test("sendDirect accepts a unique display alias and stores the canonical recipient", () => {
+    const dirs = makeDirs("collab-store-send-direct-alias");
+    writeRegistration(dirs, makeRegistration("reviewer-ba15-SunnyBreeze"));
+
+    const sent = sendDirect(dirs, "RapidRiver", "SunnyBreeze", "hello there");
+    expect(sent).toEqual({ ok: true });
+
+    const inboxDir = path.join(dirs.inbox, "reviewer-ba15-SunnyBreeze");
+    const inboxFiles = fs.readdirSync(inboxDir).filter((name) => name.endsWith(".json"));
+    expect(inboxFiles).toHaveLength(1);
+
+    const payload = JSON.parse(fs.readFileSync(path.join(inboxDir, inboxFiles[0]!), "utf-8")) as InboxMessage;
+    expect(payload.to).toBe("reviewer-ba15-SunnyBreeze");
+
+    const events = readMessageLog(dirs);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.to).toBe("reviewer-ba15-SunnyBreeze");
   });
 
   test("sendBroadcast reports per-recipient failures and still appends one broadcast log event", () => {

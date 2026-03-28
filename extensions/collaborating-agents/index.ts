@@ -10,6 +10,7 @@ import { MessagesOverlay } from "./overlays/messages-overlay.js";
 import { loadConfig } from "./config.js";
 import { resolveDirs } from "./paths.js";
 import {
+  formatAgentDisplayName,
   getAgentByName,
   getConflictsWithOtherAgents,
   listActiveAgents,
@@ -17,6 +18,8 @@ import {
   readMessageLog,
   readMessageLogTail,
   registerSelf,
+  resolveActiveAgentName,
+  resolveThreadPeerName,
   sendBroadcast,
   sendDirect,
   unregisterSelf,
@@ -576,12 +579,6 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
     const text = event.text.length > 240 ? `${event.text.slice(0, 237)}...` : event.text;
     const priority = event.urgent ? " [urgent]" : "";
     return `${timestamp}${priority} ${event.from} -> ${target}: ${text}`;
-  }
-
-  function formatAgentDisplayName(agentName: string): string {
-    const callsignMatch = agentName.match(/-([A-Z][a-z]+[A-Z][A-Za-z]+)$/);
-    if (callsignMatch?.[1]) return callsignMatch[1];
-    return agentName;
   }
 
   function normalizeReservationPaths(paths: string[] | undefined): string[] {
@@ -1383,7 +1380,16 @@ Actions:
         }
 
         const urgent = params.urgent === true;
-        const sendResult = sendDirect(dirs, state.agentName, params.to, params.message, params.replyTo, urgent);
+        const resolvedPeer = resolveActiveAgentName(dirs, params.to);
+        if (!resolvedPeer.ok) {
+          return {
+            content: [{ type: "text", text: resolvedPeer.error }],
+            isError: true,
+            details: { action, error: resolvedPeer.error, matches: resolvedPeer.matches },
+          };
+        }
+
+        const sendResult = sendDirect(dirs, state.agentName, resolvedPeer.name, params.message, params.replyTo, urgent);
         if (!sendResult.ok) {
           return {
             content: [{ type: "text", text: sendResult.error }],
@@ -1393,8 +1399,13 @@ Actions:
         }
 
         return {
-          content: [{ type: "text", text: `Sent ${urgent ? "urgent " : ""}direct message to ${params.to}.` }],
-          details: { action, to: params.to, urgent, ok: true },
+          content: [
+            {
+              type: "text",
+              text: `Sent ${urgent ? "urgent " : ""}direct message to ${resolvedPeer.name}.`,
+            },
+          ],
+          details: { action, to: resolvedPeer.name, requestedTo: params.to, urgent, ok: true },
         };
       }
 
@@ -1461,7 +1472,16 @@ Actions:
 
         const limit = normalizeLimit(params.limit, 20, 400);
         const all = readMessageLog(dirs);
-        const peer = params.to;
+        const resolvedPeer = resolveThreadPeerName(dirs, state.agentName, all, params.to);
+        if (!resolvedPeer.ok) {
+          return {
+            content: [{ type: "text", text: resolvedPeer.error }],
+            isError: true,
+            details: { action, error: resolvedPeer.error, matches: resolvedPeer.matches },
+          };
+        }
+
+        const peer = resolvedPeer.name;
         const thread = all
           .filter((e) =>
             e.kind === "direct" &&
@@ -1479,7 +1499,7 @@ Actions:
         const lines = thread.map(formatMessageEvent);
         return {
           content: [{ type: "text", text: `Thread with ${peer} (${thread.length}):\n${lines.join("\n")}` }],
-          details: { action, to: peer, events: thread },
+          details: { action, to: peer, requestedTo: params.to, events: thread },
         };
       }
 

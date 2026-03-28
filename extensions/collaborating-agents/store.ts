@@ -349,6 +349,92 @@ export function getAgentByName(dirs: Dirs, name: string): AgentRegistration | un
   return listActiveAgents(dirs).find((a) => a.name === name);
 }
 
+export function formatAgentDisplayName(agentName: string): string {
+  const callsignMatch = agentName.match(/-([A-Z][a-z]+[A-Z][A-Za-z]+)$/);
+  if (callsignMatch?.[1]) return callsignMatch[1];
+  return agentName;
+}
+
+function normalizeAgentSpecifier(name: string): string {
+  return name.trim().replace(/\s+\((subagent|orchestrator)\)$/i, "");
+}
+
+export function resolveActiveAgentName(
+  dirs: Dirs,
+  name: string,
+):
+  | { ok: true; name: string }
+  | { ok: false; error: string; matches?: string[] } {
+  const spec = normalizeAgentSpecifier(name);
+  const agents = listActiveAgents(dirs);
+
+  const exact = agents.find((agent) => agent.name === spec);
+  if (exact) return { ok: true, name: exact.name };
+
+  const aliasMatches = agents.filter((agent) => formatAgentDisplayName(agent.name) === spec);
+  if (aliasMatches.length === 1) {
+    return { ok: true, name: aliasMatches[0]!.name };
+  }
+  if (aliasMatches.length > 1) {
+    const matches = aliasMatches.map((agent) => agent.name).sort((a, b) => a.localeCompare(b));
+    return {
+      ok: false,
+      error: `Agent alias '${spec}' is ambiguous; use one of: ${matches.join(", ")}`,
+      matches,
+    };
+  }
+
+  return { ok: false, error: `Agent '${spec}' is not active` };
+}
+
+export function resolveThreadPeerName(
+  dirs: Dirs,
+  selfAgentName: string,
+  allEvents: MessageLogEvent[],
+  name: string,
+):
+  | { ok: true; name: string }
+  | { ok: false; error: string; matches?: string[] } {
+  const spec = normalizeAgentSpecifier(name);
+
+  const exactInLog = allEvents.some(
+    (event) =>
+      event.kind === "direct" &&
+      ((event.from === selfAgentName && event.to === spec) ||
+        (event.to === selfAgentName && event.from === spec)),
+  );
+  if (exactInLog) return { ok: true, name: spec };
+
+  const activeResolution = resolveActiveAgentName(dirs, spec);
+  if (activeResolution.ok) return activeResolution;
+
+  const candidates = [
+    ...new Set(
+      allEvents
+        .filter(
+          (event) =>
+            event.kind === "direct" && (event.from === selfAgentName || event.to === selfAgentName),
+        )
+        .map((event) => (event.from === selfAgentName ? String(event.to) : event.from)),
+    ),
+  ];
+
+  const aliasMatches = candidates.filter((candidate) => formatAgentDisplayName(candidate) === spec);
+  if (aliasMatches.length === 1) {
+    return { ok: true, name: aliasMatches[0]! };
+  }
+  if (aliasMatches.length > 1) {
+    const matches = aliasMatches.sort((a, b) => a.localeCompare(b));
+    return {
+      ok: false,
+      error: `Agent alias '${spec}' is ambiguous; use one of: ${matches.join(", ")}`,
+      matches,
+    };
+  }
+
+  return activeResolution;
+}
+
 export function pathMatchesReservation(filePath: string, pattern: string): boolean {
   const normalizedFilePath = normalize(filePath).replace(/^\.\//, "");
   const normalizedPattern = normalize(pattern).replace(/^\.\//, "");
@@ -513,15 +599,24 @@ export function sendDirect(
 ): { ok: true } | { ok: false; error: string } {
   const trimmed = text.trim();
   if (!trimmed) return { ok: false, error: "Message is empty" };
-  if (to === from) return { ok: false, error: "Cannot send direct message to yourself" };
 
-  const target = getAgentByName(dirs, to);
-  if (!target) return { ok: false, error: `Agent '${to}' is not active` };
+  const normalizedTo = normalizeAgentSpecifier(to);
+  if (normalizedTo === from || normalizedTo === formatAgentDisplayName(from)) {
+    return { ok: false, error: "Cannot send direct message to yourself" };
+  }
+
+  const resolved = resolveActiveAgentName(dirs, to);
+  if (!resolved.ok) return { ok: false, error: resolved.error };
+
+  if (resolved.name === from) return { ok: false, error: "Cannot send direct message to yourself" };
+
+  const target = getAgentByName(dirs, resolved.name);
+  if (!target) return { ok: false, error: `Agent '${resolved.name}' is not active` };
 
   const message: InboxMessage = {
     id: randomUUID(),
     from,
-    to,
+    to: resolved.name,
     text: trimmed,
     kind: "direct",
     timestamp: new Date().toISOString(),
@@ -530,12 +625,12 @@ export function sendDirect(
   };
 
   try {
-    enqueueInboxMessage(dirs, to, message);
+    enqueueInboxMessage(dirs, resolved.name, message);
 
     appendMessageLogEvent(dirs, {
       id: message.id,
       from,
-      to,
+      to: resolved.name,
       text: trimmed,
       kind: "direct",
       timestamp: message.timestamp,
@@ -546,7 +641,7 @@ export function sendDirect(
     return { ok: true };
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
-    return { ok: false, error: `Failed to send direct message to '${to}': ${reason}` };
+    return { ok: false, error: `Failed to send direct message to '${resolved.name}': ${reason}` };
   }
 }
 
