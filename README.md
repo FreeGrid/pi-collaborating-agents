@@ -366,3 +366,34 @@ To run all tests:
 ```bash
 bun test
 ```
+
+## Best practices for automated workflows
+
+For general automated workflows, a good default is to first ask Pi to learn the skill:collaborating-agents-sys, then let it decide how to use subagents and coordination primitives for the current task.
+
+Add the following content to AGENTS.md
+```text
+Before doing the task, first learn `skill:collaborating-agents-sys`.
+
+Use it to understand the available collaboration capabilities, including:
+- spawning and coordinating subagents
+- parallelizing suitable tasks
+- sending direct and broadcast messages between agents
+- reserving and releasing files/directories before edits
+
+Then execute the task under these rules:
+1. Prefer parallelism for read-heavy exploration and review tasks.
+2. Reserve before any write.
+3. Keep process logging single-writer when possible.
+4. Use direct messages for blockers and decisions.
+5. Use broadcasts for shared status updates.
+6. Prefer low-coupling task decomposition; avoid conflicting parallel edits.
+
+Choose an appropriate split of work, coordinate subagents carefully, and keep the execution process organized and auditable.
+```
+
+And push parallel execution in the prompt
+
+```bash
+For automation, first learn skill:collaborating-agents-sys, then decide how to parallelize, coordinate, reserve write targets, and record progress under a small set of hard constraints.
+```
