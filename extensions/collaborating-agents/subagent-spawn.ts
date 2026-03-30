@@ -60,6 +60,8 @@ const SUPPORTED_SUBAGENT_TOOL_NAMES = new Set(["read", "bash", "edit", "write", 
 const LOCAL_COLLABORATING_AGENTS_EXTENSION = path.join(path.dirname(fileURLToPath(import.meta.url)), "index.ts");
 const HOME_COLLABORATING_AGENTS_EXTENSION = path.join(os.homedir(), ".pi", "agent", "extensions", "collaborating-agents", "index.ts");
 const CMUX_PANE_IDLE_GRACE_MS = 1200;
+const CMUX_PANE_MAX_IDLE_TIMEOUT_MULTIPLIER = 6;
+const CMUX_PANE_MAX_IDLE_TIMEOUT_BUFFER_MS = 60_000;
 
 type CmuxLayoutRole = "orchestrator" | "subagent";
 type CmuxSplitDirection = "right" | "down";
@@ -856,18 +858,29 @@ async function waitForSettledSessionResult(args: {
   timedOut: boolean;
 }> {
   const idleGraceMs = Math.max(100, Math.floor(args.idleGraceMs ?? CMUX_PANE_IDLE_GRACE_MS));
+  // Treat timeoutMs as an inactivity budget instead of an absolute wall-clock
+  // cap. Long-running research subagents can legitimately stay busy for well
+  // over 10 minutes; as long as the session file keeps changing, keep waiting.
+  const inactivityTimeoutMs = Math.max(idleGraceMs, Math.floor(args.timeoutMs));
+  const hardTimeoutMs = Math.max(
+    inactivityTimeoutMs,
+    inactivityTimeoutMs * CMUX_PANE_MAX_IDLE_TIMEOUT_MULTIPLIER,
+    inactivityTimeoutMs + CMUX_PANE_MAX_IDLE_TIMEOUT_BUFFER_MS,
+  );
   const startedAt = Date.now();
+  let activityDeadlineAt = startedAt + inactivityTimeoutMs;
   let lastObservedToken = readFileChangeToken(args.sessionFile);
   let lastParsedToken: FileChangeToken | null = null;
   let lastActivityAt = Date.now();
   let sessionId: string | undefined;
   let terminalAssistantText: string | undefined;
 
-  while (Date.now() - startedAt < args.timeoutMs) {
+  while (Date.now() - startedAt < hardTimeoutMs && Date.now() < activityDeadlineAt) {
     const currentToken = readFileChangeToken(args.sessionFile);
     if (didFileChange(currentToken, lastObservedToken)) {
       lastObservedToken = currentToken;
       lastActivityAt = Date.now();
+      activityDeadlineAt = lastActivityAt + inactivityTimeoutMs;
     }
 
     if (lastParsedToken === null || didFileChange(currentToken, lastParsedToken)) {
@@ -896,10 +909,19 @@ async function waitForSettledSessionResult(args: {
     await sleep(100);
   }
 
+  const exitCode = readExitMarkerCode(args.exitMarkerPath);
+  if (exitCode !== null && exitCode !== 0) {
+    return { sessionId, terminalAssistantText, exitCode, timedOut: false };
+  }
+
+  if (terminalAssistantText !== undefined && Date.now() - lastActivityAt >= idleGraceMs) {
+    return { sessionId, terminalAssistantText, exitCode, timedOut: false };
+  }
+
   return {
     sessionId,
     terminalAssistantText,
-    exitCode: readExitMarkerCode(args.exitMarkerPath),
+    exitCode,
     timedOut: true,
   };
 }

@@ -830,6 +830,63 @@ describe("subagent spawn", () => {
     ]);
   });
 
+  test("extends the cmux result timeout while the session file is still actively changing", async () => {
+    const tempDir = makeTempDir("collab-subagent-cmux-pane-active-timeout-extension");
+    const { argsFile } = writeFakePiBinary(tempDir);
+    const { argsFile: cmuxArgsFile } = writeFakeCmuxBinary(tempDir);
+
+    process.env.PATH = `${tempDir}:${process.env.PATH ?? ""}`;
+    process.env.TEST_ARGS_FILE = argsFile;
+    process.env.TEST_CMUX_ARGS_FILE = cmuxArgsFile;
+    process.env.TEST_CMUX_SEND_ASYNC = "1";
+    process.env.TEST_PI_EXIT_DELAY_MS = "2500";
+    process.env.TEST_PI_MULTI_TURN = "1";
+
+    const agentDef: SpawnAgentDefinition = {
+      name: "worker",
+      description: "Worker",
+      systemPrompt: "Return concise findings.",
+      source: "bundled",
+      filePath: "/tmp/worker.toml",
+      tools: ["read", "bash"],
+    };
+
+    const result = await runSpawnTask(
+      tempDir,
+      {
+        agent: "worker",
+        task: "Inspect the repository",
+      },
+      agentDef,
+      {
+        index: 0,
+        runId: "testrun4-active-timeout",
+        recursionDepth: 0,
+        launchMode: "cmux-pane",
+        cmuxResultTimeoutMs: 500,
+      },
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.output).toBe("fake-final");
+    expect(result.cmuxPaneClosed).toBe(true);
+
+    const capturedCmuxArgs = getCapturedCmuxArgs(cmuxArgsFile);
+    expect(getCmuxCommandNames(capturedCmuxArgs)).toEqual([
+      "identify",
+      "list-panes",
+      "list-pane-surfaces",
+      "new-split",
+      "identify",
+      "send",
+      "list-panes",
+      "list-pane-surfaces",
+      "list-pane-surfaces",
+      "identify",
+      "close-surface",
+    ]);
+  });
+
   test("detects successful cmux-pane completion even when the final session write preserves mtime", async () => {
     const tempDir = makeTempDir("collab-subagent-cmux-pane-stable-mtime");
     const { argsFile } = writeFakePiBinary(tempDir);
