@@ -64,6 +64,11 @@ const CMUX_PANE_IDLE_GRACE_MS = 1200;
 type CmuxLayoutRole = "orchestrator" | "subagent";
 type CmuxSplitDirection = "right" | "down";
 
+interface FileChangeToken {
+  mtimeMs: number;
+  size: number;
+}
+
 interface CmuxLayoutLeafNode {
   kind: "leaf";
   id: string;
@@ -751,12 +756,25 @@ function readExitMarkerCode(exitMarkerPath: string): number | null {
   }
 }
 
-function readFileMtimeMs(filePath: string): number | null {
+function readFileChangeToken(filePath: string): FileChangeToken | null {
   try {
-    return fs.statSync(filePath).mtimeMs;
+    const stats = fs.statSync(filePath);
+    return {
+      mtimeMs: stats.mtimeMs,
+      size: stats.size,
+    };
   } catch {
     return null;
   }
+}
+
+function didFileChange(current: FileChangeToken | null, previous: FileChangeToken | null): boolean {
+  if (!current) return false;
+  if (!previous) return true;
+  // Some session appends can preserve mtime (or land within the same filesystem
+  // timestamp quantum), so use size as a second signal instead of relying on
+  // mtime alone.
+  return Math.abs(current.mtimeMs - previous.mtimeMs) > 0.5 || current.size !== previous.size;
 }
 
 function parseSessionMessageLine(line: string): {
@@ -839,20 +857,20 @@ async function waitForSettledSessionResult(args: {
 }> {
   const idleGraceMs = Math.max(100, Math.floor(args.idleGraceMs ?? CMUX_PANE_IDLE_GRACE_MS));
   const startedAt = Date.now();
-  let lastObservedMtime = readFileMtimeMs(args.sessionFile) ?? 0;
-  let lastParsedMtime = -1;
+  let lastObservedToken = readFileChangeToken(args.sessionFile);
+  let lastParsedToken: FileChangeToken | null = null;
   let lastActivityAt = Date.now();
   let sessionId: string | undefined;
   let terminalAssistantText: string | undefined;
 
   while (Date.now() - startedAt < args.timeoutMs) {
-    const currentMtime = readFileMtimeMs(args.sessionFile) ?? 0;
-    if (currentMtime > lastObservedMtime + 0.5) {
-      lastObservedMtime = currentMtime;
+    const currentToken = readFileChangeToken(args.sessionFile);
+    if (didFileChange(currentToken, lastObservedToken)) {
+      lastObservedToken = currentToken;
       lastActivityAt = Date.now();
     }
 
-    if (lastParsedMtime < 0 || currentMtime > lastParsedMtime + 0.5) {
+    if (lastParsedToken === null || didFileChange(currentToken, lastParsedToken)) {
       const state = readSpawnSessionState(args.sessionFile);
       if (state.sessionId) {
         sessionId = state.sessionId;
@@ -861,7 +879,9 @@ async function waitForSettledSessionResult(args: {
       if (state.terminalAssistantText !== undefined) {
         terminalAssistantText = state.terminalAssistantText;
       }
-      lastParsedMtime = currentMtime;
+      if (currentToken) {
+        lastParsedToken = currentToken;
+      }
     }
 
     const exitCode = readExitMarkerCode(args.exitMarkerPath);
@@ -1313,6 +1333,7 @@ export async function runSpawnTask(
     launchDelayMs?: number;
     launchMode?: "process" | "cmux-pane";
     closeCompletedCmuxPane?: boolean;
+    cmuxResultTimeoutMs?: number;
     onLaunch?: (launch: SpawnResult) => void | Promise<void>;
   },
 ): Promise<SpawnResult> {
@@ -1387,6 +1408,7 @@ export async function runSpawnTask(
   }
 
   const launchDelayMs = Math.max(0, Math.floor(options.launchDelayMs ?? 0));
+  const cmuxResultTimeoutMs = Math.max(100, Math.floor(options.cmuxResultTimeoutMs ?? 600_000));
 
   const result: SpawnResult = {
     agent: task.agent,
@@ -1497,7 +1519,7 @@ export async function runSpawnTask(
     const sessionState = await waitForSettledSessionResult({
       sessionFile: result.sessionFile!,
       exitMarkerPath: exitMarkerPath!,
-      timeoutMs: 600_000,
+      timeoutMs: cmuxResultTimeoutMs,
       onUpdate: (state) => {
         if (state.sessionId) result.sessionId = state.sessionId;
       },
